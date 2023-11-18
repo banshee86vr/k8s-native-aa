@@ -1,66 +1,66 @@
-# Kubernetes native authentication & authorization test
+# Kubernetes Native Authentication & Authorization Test
 
-Utilizzando il metodo di autenticazione nativo di K8s tramite i certificati TLS ho implementato lo script sh `create_user_certs.sh` che ti permette di creare un utente e associare i gruppi che vuoi all’interno del certificato stesso. Successivamente con lo script `bind_roles.sh` vengono eseguite delle associazioni di permessi sia sui gruppi che su utenti singoli sfruttando i campi `CN` e `O` dei certificati creati in precedenza per i vari utenti.
+Using the native authentication method of K8s through TLS certificates, I have implemented the shell script `create_user_certs.sh`. This script allows you to create a user and associate the desired groups within the certificate itself. Subsequently, the `bind_roles.sh` script executes permission associations on both groups and individual users, leveraging the `CN` and `O` fields of the previously created certificates for various users.
 
-Nello specifico nella demo ho seguito questi passi:
+Specifically, in the demo, I followed these steps:
 
-* Creazione utente **admin** appartenente al gruppo **admins**
-* Creazione utente **dev** e **superdev** appartenenti al gruppo **developers**
-* Creato e associato pieni permessi al gruppo admins su tutti i namespace tramite ClusterRole
-* Creato e associato permessi di sola visualizzazione al gruppo developers su tutti i namespace tramite ClusterRole
-* Creato e associato pieni permessi all’utente superdev solo sul namespace **test** tramite Role
+- Created the user **admin** belonging to the **admins** group.
+- Created the users **dev** and **superdev** belonging to the **developers** group.
+- Created and associated full permissions to the admins group across all namespaces using ClusterRole.
+- Created and associated view-only permissions to the developers group across all namespaces using ClusterRole.
+- Created and associated full permissions to the superdev user only in the **test** namespace using Role.
 
-Gli script creano un kubeconfig per ogni utente e tutti i certificati usati in una cartella certs. I test li ho fatti usando proprio i kubeconfig creati, e confermo che i permessi vengono correttamente associati agli utenti o ai gruppi specificati.
+The scripts generate a kubeconfig for each user, and all certificates used are stored in a folder named `certs`. I conducted tests using the created kubeconfigs, confirming that permissions are correctly associated with the specified users or groups.
 
-Se volete diamo un’occhiata insieme ma potrebbe essere un giro valido anche per Krateo e impostare poi, come discusso, i permessi sulle varie CRD.
+If you are interested, we can take a look together. This approach could also be valuable for Krateo, setting permissions on various CRDs as discussed.
 
-## Check usser acctoun expiration
+## Check User Account Expiration
 
-Ho fatto un po’ di prove e confermo che per verificare la scadenza delle utenze è possibile automatizzare il controllo del campo End Date del certificato ottenuto nella CSR creata ad hoc per l’utenza.
+I conducted some experiments and can confirm that to check the expiration of accounts, it is possible to automate the verification of the End Date field of the certificate obtained in the CSR created specifically for the user.
 
-Le CSR usate per la creazione delle utenze contengono i certificati creati nel campo .status.certificate. Da qui secondo me abbiamo tutto per poter monitorare le utenze,i gruppi (tramite i campi CN e O dei certificati) e i relativi ClusterRoleBinding e RoleBinding associati.
+The CSRs used for creating the users contain the certificates created in the .status.certificate field. From here, we have everything we need to monitor users, groups (through the CN and O fields of the certificates), and the related ClusterRoleBinding and RoleBinding.
 
-Per la verifica della scadenza vi riporto uno script fatto per verificare tutte le scadenze dei certificati a fronte di un threshold:
+For expiration verification, here's a script to check all certificate expirations against a given threshold:
 
 ```bash
 #!/bin/bash
- 
+
 DAYS=364
 SECONDSPERDAY=86400
 THRESHOLD=$(( DAYS * SECONDSPERDAY ))
 echo "Checking expiration date with threshold $DAYS day(s)"
- 
+
 CSR_LIST=$(kubectl get csr | awk '{print $1}' | tail -n +2)
- 
+
 CSR_ARRAY=()
 while read -r csr; do
    CSR_ARRAY+=("$csr")
 done <<< "$CSR_LIST"
- 
+
 for csr in "${CSR_ARRAY[@]}"
 do
     CSR_CERT=$(kubectl get csr $csr -o jsonpath='{.status.certificate}')
     CERT_END_DATE=$(echo $CSR_CERT | base64 --decode | openssl x509 -noout -enddate | awk -F '=' '{print $NF}')
     echo $CSR_CERT | base64 --decode | openssl x509 -noout -checkend $THRESHOLD
- 
+
     echo "$csr ---> $CERT_END_DATE ---> $?"
 done
 ```
 
-Con il comando `openssl x509 -noout -checkend $THRESHOLD` è possibile sapere se quel certificato scadrà tra N giorni:
+Using the command `openssl x509 -noout -checkend $THRESHOLD`, it is possible to determine if a certificate will expire in N days:
 
-* RC == 0: *non scadrà* tra N giorni
-* RC ==1: *scadrà* tra N giorni
+- RC == 0: *will not expire* in N days
+- RC == 1: *will expire* in N days
 
-In questo modo, ad esempio, si può pensare di notificare all’utente che la sua utenza sta per scadere tramite:
-E-mail: eventualmente inserendo il campo `email` nel parametro `subj` della CSR e sfruttandolo per l’invio della e-mail
-Notifica UI Krateo: post login
+This way, for example, you can consider notifying the user that their account is about to expire via:
+- Email: possibly by including the `email` field in the CSR `subj` parameter and using it for email notification.
+- UI Notification in Krateo: post login
 
-Nel campo della CSR è possibile inserire un parametro `expirationSeconds` con il quale impostare la validità del certificato creato con quella CSR (int32, minimo=10min, default=365gg). Per la rotazione del certificato invece c’è una dipendenza rispetto alle configurazioni del cluster k8s (<https://kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping/#certificate-rotation>), nello specifico del parametro `RotateKubeletClientCertificate`.
+In the CSR field, you can insert an `expirationSeconds` parameter to set the validity of the certificate created with that CSR (int32, minimum=10min, default=365 days). For certificate rotation, there is a dependency on the k8s cluster configurations (<https://kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping/#certificate-rotation>), specifically the `RotateKubeletClientCertificate` parameter.
 
-Qui le vie sono due:
+There are two possible approaches here:
 
-* `RotateKubeletClientCertificate == TRUE`: notificare il nuovo kubenconfig con il nuovo certificato creato in automatico
-* `RotateKubeletClientCertificate == FALSE`: creare una nuova CSR e quindi un nuovo kubeconfig con nuovo certificato
+- `RotateKubeletClientCertificate == TRUE`: Notify the user of the new kubeconfig with the new certificate created automatically.
+- `RotateKubeletClientCertificate == FALSE`: Create a new CSR and hence a new kubeconfig with a new certificate.
 
-Nulla vieta di rendersi agnostici rispetto alla configurazione del cluster e decidere di gestire la rotazione con un controller fatto da noi, facendo sostanzialmente i controlli dello script sopra e poi rendere disponibile il nuovo kubeconfig.
+Nothing prevents us from being agnostic regarding the cluster configuration and deciding to manage rotation with a controller of our own, essentially performing the checks from the script above and then making the new kubeconfig available.
